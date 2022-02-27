@@ -4,6 +4,8 @@
 import gi
 gi.require_version('Gtk','3.0')
 from gi.repository import Gtk
+from gi.repository import GLib
+import threading, time
 from pyvi import ViTokenizer,ViPosTagger
 
 def normalize_text(text):
@@ -31,6 +33,8 @@ class VnCoreTool(Gtk.Window):
         self.index = -1
         self.saveTo = ""
         self.action = "seggment"
+        self.running = False
+        self.job = None
         self.init_ui()
 
     def init_ui(self):
@@ -109,7 +113,11 @@ class VnCoreTool(Gtk.Window):
 
         vbox.pack_start(hbox,False, False, 1)
 
-    def on_load_clicked(self, button):
+        self.btnAuto = Gtk.Button(label="Tự động chạy")
+        self.btnAuto.connect('clicked', self.on_auto_run_clicked)
+        vbox.pack_start(self.btnAuto,False, False, 1)
+
+    def on_load_clicked(self, button, trigger=True):
         self.lblState.set_text("")
         filechooserdialog = Gtk.FileChooserDialog(title="Chọn tập tin", parent=self, action=Gtk.FileChooserAction.OPEN)
         filechooserdialog.add_buttons("_Open", Gtk.ResponseType.OK)
@@ -141,11 +149,12 @@ class VnCoreTool(Gtk.Window):
         if len(self.lines) == 0:
             self.info_dialog("Lỗi tải tập tin","Tập tin rỗng")
         else:
-            self.on_next_clicked(self.btnNext)
-            self.textview.set_editable(True)
-            self.btnNext.set_sensitive(True)
-            self.btnSave.set_sensitive(True)
-            self.btnEval.set_sensitive(True)
+            if trigger:
+                self.on_next_clicked(self.btnNext)
+                self.textview.set_editable(True)
+                self.btnNext.set_sensitive(True)
+                self.btnSave.set_sensitive(True)
+                self.btnEval.set_sensitive(True)
 
     def on_next_clicked(self, button):
         self.lblState.set_text("")
@@ -179,7 +188,7 @@ class VnCoreTool(Gtk.Window):
         else:
             self.btnPrev.set_sensitive(True)
 
-    def on_saved_clicked(self, button):
+    def on_saved_clicked(self, button, trigger=True):
         if not self.saveTo:
             filechooserdialog = Gtk.FileChooserDialog(title="Chọn tập tin lưu", parent=self, action=Gtk.FileChooserAction.SAVE)
             filechooserdialog.add_buttons("_Open", Gtk.ResponseType.OK)
@@ -196,6 +205,8 @@ class VnCoreTool(Gtk.Window):
                 self.saveTo = filechooserdialog.get_filename()
 
             filechooserdialog.destroy()
+        if not trigger:
+            return
         if self.saveTo:
             try:
                 textbuffer = self.textview.get_buffer()
@@ -242,6 +253,79 @@ class VnCoreTool(Gtk.Window):
             self.btnTagger.get_style_context().remove_class('gtk_actived')
             self.btnSegmention.get_style_context().add_class('gtk_actived')
             self.action = "tagger"
+
+    
+
+    def autorun(self, widget, data=None):
+        try:
+            if self.index >= 0:
+                fout = open(self.saveTo, 'a+',encoding='utf-8')
+            else:
+                fout = open(self.saveTo, 'w',encoding='utf-8')
+            total = len(self.lines)
+            while self.running:
+                if self.index < 0:
+                    self.index += 1
+                while self.index < total:
+                    text = self.lines[self.index]
+                    text = text.replace('”','"')
+                    text = text.replace('“','"')
+                    text = normalize_text(text+' ').strip()
+                    if not text:
+                        continue
+                    if self.action == "seggment":
+                        text = ViTokenizer.tokenize(text)
+                    else:
+                        result = ViPosTagger.postagging(ViTokenizer.tokenize(text))
+                        text = ''
+                        for i in range(len(result[0])):
+                            text += ' ' + result[0][i]+'/'+result[1][i]
+                        text = text.strip()
+                    fout.write(text + "\n")
+                    status = "Đã xử lý dòng %d/%d xong." % ((self.index + 1), total)
+                    widget.set_text(status)
+                    time.sleep(0.1)
+                    t = threading.currentThread()
+                    if getattr(t,"killed", True):
+                        break
+                    self.index += 1
+            fout.close()
+        except:
+            pass
+
+    def on_auto_run_clicked(self, button):
+        disabled = self.running
+        if not self.running:
+            if len(self.lines) == 0:
+                self.on_load_clicked(self.btnLoad, False)
+            if len(self.lines) == 0:
+                self.info_dialog("Lỗi tải tập tin", "Vui lòng chọn tập tin dữ liệu")
+                return
+            if not self.saveTo:
+                self.on_saved_clicked(self.btnSave, False)
+            if not self.saveTo:
+                self.info_dialog("Lỗi chọn tập tin lưu trữ", "Vui lòng chọn tập tin lưu dữ liệu")
+                return
+            self.running = True
+            button.set_label("Dừng")
+        else:
+            self.running = False
+            if self.job:
+                self.job.killed = True
+                self.job.join()
+            button.set_label("Tự động chạy")
+        self.textview.set_editable(disabled)
+        self.btnLoad.set_sensitive(disabled)
+        self.btnNext.set_sensitive(disabled)
+        self.btnSave.set_sensitive(disabled)
+        self.btnEval.set_sensitive(disabled)
+        self.btnSegmention.set_sensitive(disabled)
+        self.btnTagger.set_sensitive(disabled)
+
+        # https://stackoverflow.com/a/36499538
+        self.job = threading.Thread(target=self.autorun,args=(self.lblState, None))
+        self.job.killed = False
+        self.job.start()
 
 if __name__ == '__main__':
     win = VnCoreTool()
