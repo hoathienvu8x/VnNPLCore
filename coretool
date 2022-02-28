@@ -8,10 +8,47 @@ import sqlite3
 import threading
 import time
 import os
+from pyvi import ViTokenizer,ViPosTagger
+
+def normalize_text(text):
+    if '/B_W' in text or '/I_W' in text:
+        tokens = text.strip().split(' ')
+        text = ''
+        for tok in tokens:
+            word_tag = tok.split('/')
+            tag = word_tag.pop()
+            word = '/'.join(word_tag)
+            if tag == 'I_W':
+                text += '_'
+            else:
+                text += ' '
+            text += word
+    tags = ['Nc','Ny','Np','Nu','A','C','E','I','L','M','N','P','R','S','T','V','X','F']
+    for t in tags:
+        text = text.replace('/'+t+' ',' ')
+    return text.strip()
+
+def regx(text):
+    ans = text.replace("…","...")
+    ans = ans.replace("“","\"")
+    ans = ans.replace("”","\"")
+    for ch in "@`#$%&~|[]<>'(){}*+-=;,?.!:\"/":
+        ans = ans.replace(ch,' ' + ch + ' ')
+    return ans
+
+def tokenize(text):
+    ans = regx(text)
+    ans += " "
+    ans = ans.replace("_", " ")
+    return [ w.strip() for w in ans.split(' ') if w.strip() ]
 
 class VnCoreTool(Gtk.Window):
     def __init__(self):
         super(VnCoreTool, self).__init__()
+        self.job = None
+        self.action = "seggment"
+        self.last_id = -1
+        self.entry = None
         self.init_ui()
         self.show_all()
         self.initialDB()
@@ -21,7 +58,7 @@ class VnCoreTool(Gtk.Window):
         self.set_title("Công cụ tạo tập dữ liệu huấn luyện")
         self.set_size_request(500, 250)
         self.set_position(Gtk.WindowPosition.CENTER)
-        self.set_icon_from_file('favicon.svg')
+        self.set_icon_from_file('favicon.png')
         self.set_resizable(False)
         self.connect('delete_event', self.quit)
 
@@ -31,11 +68,11 @@ class VnCoreTool(Gtk.Window):
 
         tbox = Gtk.Box(spacing=10)
         self.btnSegmention = Gtk.Button(label="Tách từ")
-        # self.btnSegmention.connect("clicked", self.on_button_toggled, "1")
+        self.btnSegmention.connect("clicked", self.on_button_toggled, "1")
         tbox.pack_start(self.btnSegmention, False, False, 0)
 
         self.btnTagger = Gtk.Button(label="Gán nhãn")
-        # self.btnTagger.connect("clicked", self.on_button_toggled, "2")
+        self.btnTagger.connect("clicked", self.on_button_toggled, "2")
         tbox.pack_start(self.btnTagger, False, False, 0)
 
         css_btn = Gtk.CssProvider()
@@ -47,7 +84,7 @@ class VnCoreTool(Gtk.Window):
         
         vbox.pack_start(tbox,False, False, 0)
 
-        # self.on_button_toggled(self.btnSegmention, "1")
+        self.on_button_toggled(self.btnSegmention, "1")
 
         scrolledWindow = Gtk.ScrolledWindow()
         scrolledWindow.set_hexpand(True)
@@ -56,7 +93,7 @@ class VnCoreTool(Gtk.Window):
         vbox.pack_start(scrolledWindow,True, True, 1)
 
         self.textview = Gtk.TextView()
-        self.textview.set_editable(False)
+        self.textview.set_editable(True)
         self.textview.set_wrap_mode(Gtk.WrapMode.WORD)
         scrolledWindow.add(self.textview)
 
@@ -76,79 +113,349 @@ class VnCoreTool(Gtk.Window):
 
         hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=5)
 
-        self.btnLoad = Gtk.Button(label="Tải dữ liệu")
-        # self.btnLoad.connect('clicked', self.on_load_clicked)
-        hbox.pack_start(self.btnLoad, True, True, 0)
+        self.btnAdd = Gtk.Button(label="Thêm dữ liệu")
+        self.btnAdd.connect('clicked', self.on_add_clicked)
+        hbox.pack_start(self.btnAdd, True, True, 0)
 
         self.btnPrev = Gtk.Button(label="Trước đó")
-        # self.btnPrev.connect('clicked', self.on_prev_clicked)
+        self.btnPrev.connect('clicked', self.on_prev_clicked)
         self.btnPrev.set_sensitive(False)
         hbox.pack_start(self.btnPrev, True, True, 0)
         
         self.btnNext = Gtk.Button(label="Tiếp theo")
-        # self.btnNext.connect('clicked', self.on_next_clicked)
-        self.btnNext.set_sensitive(False)
+        self.btnNext.connect('clicked', self.on_next_clicked)
+        self.btnNext.set_sensitive(True)
         hbox.pack_start(self.btnNext, True, True, 0)
 
         self.btnSave = Gtk.Button(label="Lưu dữ liệu")
-        # self.btnSave.connect('clicked', self.on_saved_clicked)
-        self.btnSave.set_sensitive(False)
+        self.btnSave.connect('clicked', self.on_saved_clicked)
+        self.btnSave.set_sensitive(True)
         hbox.pack_start(self.btnSave, True, True, 0)
 
         self.btnEval = Gtk.Button(label="Tự động")
-        # self.btnEval.connect('clicked', self.on_auto_clicked)
-        self.btnEval.set_sensitive(False)
+        self.btnEval.connect('clicked', self.on_auto_clicked)
+        self.btnEval.set_sensitive(True)
         hbox.pack_start(self.btnEval, True, True, 0)
 
         vbox.pack_start(hbox,False, False, 0)
+
+        self.btnAuto = Gtk.Button(label="Chạy tự động")
+        self.btnAuto.connect('clicked', self.on_autorun_clicked)
+        vbox.pack_start(self.btnAuto, True, True, 0)
 
         separator = Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL)
         separator.set_margin_top(0)
         separator.set_margin_bottom(0)
         vbox.pack_start(separator, True, False, 0)
 
-        hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=5)
-        self.lblDB = Gtk.Label(label="", xalign=0)
-        self.lblDB.get_style_context().add_provider(provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
-        self.lblDB.get_style_context().add_class('gtk_label')
-        hbox.pack_start(self.lblDB, True, True, 0)
-        self.lblSocket = Gtk.Label(label="", xalign=0)
-        self.lblSocket.get_style_context().add_provider(provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
-        self.lblSocket.get_style_context().add_class('gtk_label')
-        hbox.pack_start(self.lblSocket, True, True, 0)
-        hbox.set_margin_top(0)
-        hbox.set_margin_bottom(0)
-        vbox.pack_start(hbox,True, True, 0)
+        self.lblstatus = Gtk.Label(label="", xalign=0)
+        self.lblstatus.get_style_context().add_provider(provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+        self.lblstatus.get_style_context().add_class('gtk_label')
+        vbox.pack_start(self.lblstatus,True, True, 0)
 
-        self.job = threading.Thread(target=self.service, args=())
-        self.job.killed = False
-        self.job.start()
+    def on_autorun_clicked(self, button):
+        disabled = True
+        if not self.job or not self.job.is_alive():
+            disabled = False
+            button.set_label("Dừng")
+            self.job = threading.Thread(target=self.service, args=())
+            self.job.killed = False
+            self.job.start()
+        else:
+            self.kill_thread()
+            self.job = None
+            button.set_label("Chạy tự động")
+        self.textview.set_editable(disabled)
+        self.btnAdd.set_sensitive(disabled)
+        self.btnNext.set_sensitive(disabled)
+        self.btnSave.set_sensitive(disabled)
+        self.btnEval.set_sensitive(disabled)
+        self.btnSegmention.set_sensitive(disabled)
+        self.btnTagger.set_sensitive(disabled)
+
+    def on_button_toggled(self, button, name):
+        if name == "1":
+            self.btnSegmention.get_style_context().remove_class('gtk_actived')
+            self.btnTagger.get_style_context().add_class('gtk_actived')
+            self.action = "seggment"
+        else:
+            self.btnTagger.get_style_context().remove_class('gtk_actived')
+            self.btnSegmention.get_style_context().add_class('gtk_actived')
+            self.action = "tagger"
+        if self.entry:
+            if self.action == "seggment":
+                tokens = (self.entry['tokens'] if self.entry['tokens'] else self.entry['sentence']).split(' ')
+                for i, tok in enumerate(tokens):
+                    if '_' in tok:
+                        tokens[i] = '<b><span color="blue">'+tok+'</span></b>'
+            else:
+                tokens = (self.entry['tagged'] if self.entry['tagged'] else self.entry['sentence']).split(' ')
+                for i, tok in enumerate(tokens):
+                    word_tag = tok.split('/')
+                    tag = word_tag.pop()
+                    word = '/'.join(word_tag)
+                    tokens[i] = word+'<b><span color="blue">/'+tag+'</span></b>'
+            text_buffer = Gtk.TextBuffer()
+            self.textview.set_buffer(text_buffer)
+            text_buffer.insert_markup(text_buffer.get_start_iter(),' '.join(tokens), -1)
+
+    def on_auto_clicked(self, button):
+        textbuffer = self.textview.get_buffer()
+        text = textbuffer.get_text(textbuffer.get_start_iter(),textbuffer.get_end_iter(),True).strip()
+        if text:
+            text = text.replace('”','"')
+            text = text.replace('“','"')
+            text = normalize_text(text+' ')
+            if self.action == "seggment":
+                tokens = ViTokenizer.tokenize(text).split(' ')
+                for i, tok in enumerate(tokens):
+                    if '_' in tok:
+                        tok = '<b><span color="blue">'+tok+'</span></b>'
+                        tokens[i] = tok
+                text = ' '.join(tokens)
+            else:
+                result = ViPosTagger.postagging(ViTokenizer.tokenize(text))
+                text = ''
+                for i in range(len(result[0])):
+                    text += ' ' + result[0][i]+'<b><span color="blue">/'+result[1][i]+'</span></b>'
+                text = text.strip()
+            text_buffer = Gtk.TextBuffer()
+            self.textview.set_buffer(text_buffer)
+            text_buffer.insert_markup(text_buffer.get_start_iter(),text, -1)
+        else:
+            self.lblState.set_markup('<span color="brown">Không có dữ liệu</span>')
+
+    def on_saved_clicked(self, button):
+        if self.last_id <= 0:
+            self.lblState.set_markup('<span color="brown">Không có thông tin để cập nhật</span>')
+            return
+        textbuffer = self.textview.get_buffer()
+        text = textbuffer.get_text(textbuffer.get_start_iter(),textbuffer.get_end_iter(),True).strip()
+        if text:
+            text = text.replace('”','"')
+            text = text.replace('“','"')
+            try:
+                cur = self.db.cursor()
+                item = cur.execute("SELECT id FROM sentences WHERE id = ? ", [ self.last_id ]).fetchone()
+                if not item:
+                    self.lblState.set_markup('<span color="brown">Không có thông tin để cập nhật</span>')
+                    cur.close()
+                    return
+                act = "gắn nhãn"
+                if self.action == "seggment":
+                    act = "tách từ"
+                    cur.execute("UPDATE sentences SET tokens = ? WHERE id = ?", [ text, self.last_id ])
+                else:
+                    cur.execute("UPDATE sentences SET tagged = ? WHERE id = ?", [ text, self.last_id ])
+                self.db.commit()
+                if self.db.total_changes >= 0:
+                    self.lblState.set_markup('<span color="green">Đã cập nhật %s cho #%d</span>' % ( act, self.last_id))
+                else:
+                    self.lblState.set_markup('<span color="brown">Lỗi cập nhật %s cho #%d</span>' % ( act, self.last_id))
+                cur.close()
+            except Exception as ex:
+                act = "tách từ" if self.action == "seggment" else "gắn nhãn" 
+                self.lblState.set_markup('<span color="brown">Lỗi cập nhật %s: %s</span>' % (act, str(ex)))
+        else:
+            self.lblState.set_markup('<span color="brown">Không có dữ liệu</span>')
+
+    def on_add_clicked(self, button):
+        textbuffer = self.textview.get_buffer()
+        text = textbuffer.get_text(textbuffer.get_start_iter(),textbuffer.get_end_iter(),True).strip()
+        if text:
+            text = text.replace('”','"')
+            text = text.replace('“','"')
+            text = normalize_text(text+' ').replace('_',' ').strip()
+            tokens = tokenize(text.lower())
+            tokens = [ tok for tok in tokens if not tok in "@`#$%&~|[]<>'(){}*+-=;,?.!:\"/" and not tok.isdigit() ]
+            try:
+                cur = self.db.cursor()
+                item = cur.execute("SELECT id FROM sentences WHERE sentence = ?", [ text ]).fetchone()
+                if item:
+                    self.lblState.set_markup('<span color="brown">Đã lưu #%d</span>' % item[0])
+                    self.last_id = item[0]
+                    cur.close()
+                    return
+                cur.execute("INSERT INTO sentences (sentence, cleaned) VALUES (?, ?)", [ text, ' '.join(tokens)])
+                self.db.commit()
+                if self.db.total_changes > 0:
+                    self.last_id = cur.lastrowid
+                    self.lblState.set_markup('<span color="green">Đã lưu #%d</span>' % self.last_id)
+                    cur.close()
+                else:
+                    cur.close()
+                    self.lblState.set_markup('<span color="red">Lỗi lưu dữ liệu</span>')
+            except Exception as ex:
+                self.lblState.set_markup('<span color="red">Lỗi %s</span>' % str(ex))
+        else:
+            self.lblState.set_markup('<span color="brown">Không có dữ liệu</span>')
+
+    def on_next_clicked(self, button):
+        try:
+            cur = self.db.cursor()
+            item = cur.execute("SELECT id, sentence, cleaned, tokens, tagged FROM sentences WHERE id > ? ORDER BY id ASC LIMIT 1" , [ self.last_id ]).fetchone()
+            if not item:
+                cur.close()
+                self.lblState.set_markup('<span color="brown">Không có dữ liệu</span>')
+                return
+            self.last_id = item[0]
+            self.entry = {
+                'sentence': item[1],
+                'cleaned': item[2],
+                'tokens': item[3],
+                'tagged': item[4]
+            }
+            if self.action == "seggment":
+                tokens = (self.entry['tokens'] if self.entry['tokens'] else self.entry['sentence']).split(' ')
+                for i, tok in enumerate(tokens):
+                    if '_' in tok:
+                        tokens[i] = '<b><span color="blue">'+tok+'</span></b>'
+            else:
+                tokens = (self.entry['tagged'] if self.entry['tagged'] else self.entry['sentence']).split(' ')
+                for i, tok in enumerate(tokens):
+                    word_tag = tok.split('/')
+                    tag = word_tag.pop()
+                    word = '/'.join(word_tag)
+                    tokens[i] = word+'<b><span color="blue">/'+tag+'</span></b>'
+            text_buffer = Gtk.TextBuffer()
+            self.textview.set_buffer(text_buffer)
+            text_buffer.insert_markup(text_buffer.get_start_iter(),' '.join(tokens), -1)
+            item = cur.execute("SELECT id FROM sentences WHERE id < ? ORDER BY id DESC LIMIT 1" , [ self.last_id ]).fetchone()
+            if item:
+                self.btnPrev.set_sensitive(True)
+            else:
+                self.btnPrev.set_sensitive(False)
+            item = cur.execute("SELECT id FROM sentences WHERE id > ? ORDER BY id DESC LIMIT 1" , [ self.last_id ]).fetchone()
+            if item:
+                self.btnNext.set_sensitive(True)
+            else:
+                self.btnNext.set_sensitive(False)
+            cur.close()
+        except Exception as ex:
+            self.lblState.set_markup('<span color="brown">Lỗi tải dữ liệu: %s</span>' % str(ex))
+
+    def on_prev_clicked(self, button):
+        try:
+            cur = self.db.cursor()
+            item = cur.execute("SELECT id, sentence, cleaned, tokens, tagged FROM sentences WHERE id < ? ORDER BY id DESC LIMIT 1" , [ self.last_id ]).fetchone()
+            if not item:
+                cur.close()
+                self.btnPrev.set_sensitive(False)
+                self.lblState.set_markup('<span color="brown">Không có dữ liệu</span>')
+                return
+            self.last_id = item[0]
+            self.entry = {
+                'sentence': item[1],
+                'cleaned': item[2],
+                'tokens': item[3],
+                'tagged': item[4]
+            }
+            if self.action == "seggment":
+                tokens = (self.entry['tokens'] if self.entry['tokens'] else self.entry['sentence']).split(' ')
+                for i, tok in enumerate(tokens):
+                    if '_' in tok:
+                        tokens[i] = '<b><span color="blue">'+tok+'</span></b>'
+            else:
+                tokens = (self.entry['tagged'] if self.entry['tagged'] else self.entry['sentence']).split(' ')
+                for i, tok in enumerate(tokens):
+                    word_tag = tok.split('/')
+                    tag = word_tag.pop()
+                    word = '/'.join(word_tag)
+                    tokens[i] = word+'<b><span color="blue">/'+tag+'</span></b>'
+            text_buffer = Gtk.TextBuffer()
+            self.textview.set_buffer(text_buffer)
+            text_buffer.insert_markup(text_buffer.get_start_iter(),' '.join(tokens), -1)
+            item = cur.execute("SELECT id FROM sentences WHERE id < ? ORDER BY id DESC LIMIT 1" , [ self.last_id ]).fetchone()
+            if item:
+                self.btnPrev.set_sensitive(True)
+            else:
+                self.btnPrev.set_sensitive(False)
+            item = cur.execute("SELECT id FROM sentences WHERE id > ? ORDER BY id DESC LIMIT 1" , [ self.last_id ]).fetchone()
+            if item:
+                self.btnNext.set_sensitive(True)
+            else:
+                self.btnNext.set_sensitive(False)
+            cur.close()
+        except Exception as ex:
+            self.lblState.set_markup('<span color="brown">Lỗi tải dữ liệu: %s</span>' % str(ex))
 
     def initialDB(self):
         try:
-            self.db = sqlite3.connect(os.path.join(os.path.dirname(__file__),'openai.db'))
-            self.db.execute("CREATE TABLE IF NOT EXISTS sentences (id INTEGER PRIMARY KEY, sentence TEXT, tokens TEXT)")
+            self.db = sqlite3.connect(os.path.join(os.path.dirname(__file__),'openai.db'), check_same_thread=False)
+            self.db.execute("CREATE TABLE IF NOT EXISTS sentences (id INTEGER PRIMARY KEY, sentence TEXT, cleaned TEXT, tokens TEXT, tagged TEXT)")
             if self.db.total_changes >= 0:
-                self.lblDB.set_markup("<span color=\"green\">openai.db connected</span>")
+                self.lblstatus.set_markup("<span color=\"green\">openai.db connected</span>")
             else:
-                self.lblDB.set_markup("<span color=\"red\">openai.db not connected</span>")
+                self.lblstatus.set_markup("<span color=\"red\">openai.db not connected</span>")
         except Exception as ex:
             self.info_dialog("Lỗi kết nối tới CSDL", str(ex))
 
-    def service(self):
-        self.lblSocket.set_markup("<span color=\"green\">Listening.</span>")
-        t = threading.currentThread()
-        while True:
-            if getattr(t,"killed", True):
-                break
-            print('Halo')
-            time.sleep(0.1)
+    def service(self):        
+        try:
+            cur = self.db.cursor()
+            sel = cur.execute("SELECT COUNT(*) AS total FROM sentences").fetchone()
+            if not sel or sel[0] == 0:
+                cur.close()
+                self.lblState.set_markup('<span color="green">Đã xử lý xong</span>')
+                return
+            total = sel[0]
+            t = threading.currentThread()
+            index = 0
+            paged = 1
+            records = 10
+            while True:
+                if getattr(t,"killed", True):
+                    cur.close()
+                    break
+                start = ( paged - 1 ) * records
+                items = cur.execute("SELECT id, sentence FROM sentences ORDER BY id ASC LIMIT {}, {}".format(start, records)).fetchall()
+                if len(items) == 0:
+                    cur.close()
+                    break
+                for item in items:
+                    tokens = ViTokenizer.tokenize(item[1])
+                    result = ViPosTagger.postagging(ViTokenizer.tokenize(item[1]))
+                    tagged = ''
+                    for i in range(len(result[0])):
+                        tagged += ' ' + result[0][i]+'/'+result[1][i]
+                    tokens = tokens.strip()
+                    tagged = tagged.strip()
+                    text = item[1].replace('”','"')
+                    text = text.replace('“','"')
+                    text = normalize_text(text+' ').replace('_',' ').strip()
+                    words = tokenize(text.lower())
+                    words = [ tok for tok in words if not tok in "@`#$%&~|[]<>'(){}*+-=;,?.!:\"/" and not tok.isdigit() ]
+                    cur.execute("UPDATE sentences SET cleaned = ?, tokens = ?, tagged = ? WHERE id = ?", [ ' '.join(words), tokens, tagged, item[0]])
+                    index += 1
+                    self.db.commit()
+                    if self.db.total_changes >= 0:
+                        self.lblState.set_markup('<span color="green">Đã xử lý %d/%d xong #%d</span>' % (index, total, item[0]))
+                    else:
+                        self.lblState.set_markup('<span color="brown">Đã xử lý %d/%d xong #%d</span>' % (index, total, item[0]))
+                if index >= total:
+                    cur.close()
+                    break
+                paged += 1
+                time.sleep(0.1)
+            self.lblState.set_markup('<span color="green">Đã xử lý xong</span>')
+            #self.on_autorun_clicked(self.btnAuto)
+            """
+            if self.job is not t:
+                self.job.cancel()
+                if not self.job.daemon:
+                    self.job.join()
+            """
+        except Exception as ex:
+            self.lblState.set_markup('<span color="brown">Lỗi: %s</span>' % str(ex))
 
     def quit(self, sender, event):
+        self.kill_thread()
+        Gtk.main_quit()
+
+    def kill_thread(self):
         if self.job:
             self.job.killed = True
             time.sleep(0.1)
-        Gtk.main_quit()
 
     def info_dialog(self, text, secondary_text):
         dialogWindow = Gtk.MessageDialog(parent=self, modal=True, destroy_with_parent=True, message_type=Gtk.MessageType.INFO, buttons=Gtk.ButtonsType.OK, text=text)
