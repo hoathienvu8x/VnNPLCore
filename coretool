@@ -155,7 +155,7 @@ class VnCoreTool(Gtk.Window):
 
     def on_autorun_clicked(self, button):
         disabled = True
-        if not self.job or not self.job.is_alive():
+        if not self.job:
             disabled = False
             button.set_label("Dừng")
             self.job = threading.Thread(target=self.service, args=())
