@@ -10,6 +10,8 @@ import time
 import os
 from pyvi import ViTokenizer,ViPosTagger
 
+PUNCTUATION = "@`#$%&~|[]<>'(){}*+-=;,?.!:\"/"
+
 def normalize_text(text):
     if '/B_W' in text or '/I_W' in text:
         tokens = text.strip().split(' ')
@@ -32,9 +34,21 @@ def regx(text):
     ans = text.replace("…","...")
     ans = ans.replace("“","\"")
     ans = ans.replace("”","\"")
-    for ch in "@`#$%&~|[]<>'(){}*+-=;,?.!:\"/":
+    ans = ans.replace("–","-")
+    ans = ans.replace(""," ")
+    for ch in PUNCTUATION:
         ans = ans.replace(ch,' ' + ch + ' ')
     return ans
+
+def is_word(word):
+    if word in PUNCTUATION:
+        return False
+    if word.isdigit():
+        return False
+    for ch in PUNCTUATION + '1234567890':
+        if ch in word:
+            return False
+    return True
 
 def tokenize(text):
     ans = regx(text)
@@ -58,7 +72,8 @@ class VnCoreTool(Gtk.Window):
         self.set_title("Công cụ tạo tập dữ liệu huấn luyện")
         self.set_size_request(500, 250)
         self.set_position(Gtk.WindowPosition.CENTER)
-        self.set_icon_from_file('favicon.png')
+        if os.path.isfile(os.path.join(os.path.dirname(__file__),'favicon.png')):
+            self.set_icon_from_file('favicon.png')
         self.set_resizable(False)
         self.connect('delete_event', self.quit)
 
@@ -75,12 +90,19 @@ class VnCoreTool(Gtk.Window):
         self.btnTagger.connect("clicked", self.on_button_toggled, "2")
         tbox.pack_start(self.btnTagger, False, False, 0)
 
+        self.btnHelp = Gtk.Button(label="Trợ giúp ?")
+        self.btnHelp.connect('clicked', self.on_help_clicked)
+        tbox.pack_end(self.btnHelp, False, False, 0)
+
         css_btn = Gtk.CssProvider()
         css_btn.load_from_data(b'.gtk_button { padding:5px 10px; font-family:arial,sans-serif; font-size:medium; border-radius: 0;background-image: none;background-color:white; } .gtk_actived { background-color:transparent; border:none; }')
         self.btnSegmention.get_style_context().add_provider(css_btn, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
         self.btnTagger.get_style_context().add_provider(css_btn, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+        self.btnHelp.get_style_context().add_provider(css_btn, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
         self.btnSegmention.get_style_context().add_class('gtk_button')
         self.btnTagger.get_style_context().add_class('gtk_button')
+        self.btnHelp.get_style_context().add_class('gtk_button')
+        self.btnHelp.get_style_context().add_class('gtk_actived')
         
         vbox.pack_start(tbox,False, False, 0)
 
@@ -151,7 +173,7 @@ class VnCoreTool(Gtk.Window):
         self.lblstatus = Gtk.Label(label="", xalign=0)
         self.lblstatus.get_style_context().add_provider(provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
         self.lblstatus.get_style_context().add_class('gtk_label')
-        vbox.pack_start(self.lblstatus,True, True, 0)
+        vbox.pack_end(self.lblstatus,True, True, 0)
 
     def on_autorun_clicked(self, button):
         disabled = True
@@ -259,6 +281,17 @@ class VnCoreTool(Gtk.Window):
         else:
             self.lblState.set_markup('<span color="brown">Không có dữ liệu</span>')
 
+    def on_help_clicked(self, button):
+        dialog = Gtk.MessageDialog(transient_for=self,flags=0,message_type=Gtk.MessageType.INFO,buttons=Gtk.ButtonsType.OK,text="Nhãn từ loại")
+        dialog.format_secondary_text("""/A Tính từ   \t/C Liên từ   \t/E Giới từ
+/I Thán từ   \t/L Định từ   \t/M Số từ
+/N Danh từ   \t/Nc Phân loại   \t/Ny Viết tắt
+/Np Tên riêng   \t/Nu Đơn vị   \t/P Đại từ
+/R Phó từ      \t/S Yếu tố      \t/T Trợ từ
+/V Động từ      \t/X Từ loại      \t/F Ký tự""")
+        dialog.run()
+        dialog.destroy()
+
     def on_add_clicked(self, button):
         textbuffer = self.textview.get_buffer()
         text = textbuffer.get_text(textbuffer.get_start_iter(),textbuffer.get_end_iter(),True).strip()
@@ -267,7 +300,7 @@ class VnCoreTool(Gtk.Window):
             text = text.replace('“','"')
             text = normalize_text(text+' ').replace('_',' ').strip()
             tokens = tokenize(text.lower())
-            tokens = [ tok for tok in tokens if not tok in "@`#$%&~|[]<>'(){}*+-=;,?.!:\"/" and not tok.isdigit() ]
+            tokens = [ tok for tok in tokens if is_word( tok ) ]
             try:
                 cur = self.db.cursor()
                 item = cur.execute("SELECT id FROM sentences WHERE sentence = ?", [ text ]).fetchone()
@@ -384,9 +417,9 @@ class VnCoreTool(Gtk.Window):
             self.db = sqlite3.connect(os.path.join(os.path.dirname(__file__),'openai.db'), check_same_thread=False)
             self.db.execute("CREATE TABLE IF NOT EXISTS sentences (id INTEGER PRIMARY KEY, sentence TEXT, cleaned TEXT, tokens TEXT, tagged TEXT)")
             if self.db.total_changes >= 0:
-                self.lblstatus.set_markup("<span color=\"green\">openai.db connected</span>")
+                self.lblstatus.set_markup("<span color=\"green\">Đã kết nối tới cơ sở dữ liệu `openai.db`</span>")
             else:
-                self.lblstatus.set_markup("<span color=\"red\">openai.db not connected</span>")
+                self.lblstatus.set_markup("<span color=\"red\">Cơ sở dữ liệu `openai.db` chưa được kết nối</span>")
         except Exception as ex:
             self.info_dialog("Lỗi kết nối tới CSDL", str(ex))
 
@@ -424,7 +457,7 @@ class VnCoreTool(Gtk.Window):
                     text = text.replace('“','"')
                     text = normalize_text(text+' ').replace('_',' ').strip()
                     words = tokenize(text.lower())
-                    words = [ tok for tok in words if not tok in "@`#$%&~|[]<>'(){}*+-=;,?.!:\"/" and not tok.isdigit() ]
+                    words = [ tok for tok in words if is_word( tok ) ]
                     cur.execute("UPDATE sentences SET cleaned = ?, tokens = ?, tagged = ? WHERE id = ?", [ ' '.join(words), tokens, tagged, item[0]])
                     index += 1
                     self.db.commit()
@@ -438,13 +471,13 @@ class VnCoreTool(Gtk.Window):
                 paged += 1
                 time.sleep(0.1)
             self.lblState.set_markup('<span color="green">Đã xử lý xong</span>')
-            #self.on_autorun_clicked(self.btnAuto)
-            """
             if self.job is not t:
+                t.join()
                 self.job.cancel()
                 if not self.job.daemon:
                     self.job.join()
-            """
+            time.sleep(0.1)
+            self.on_autorun_clicked(self.btnAuto)
         except Exception as ex:
             self.lblState.set_markup('<span color="brown">Lỗi: %s</span>' % str(ex))
 
